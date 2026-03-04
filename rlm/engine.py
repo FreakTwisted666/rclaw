@@ -1,235 +1,232 @@
+# rlm/engine.py - Core RLM Inference Engine for RLMClaw
+
 import os
-import inspect
 import json
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+import logging
+from typing import Dict, Any, Optional, Type
+from rlm import RLM, RLMLogger
+from rlm.environments import BaseEnvironment # Assuming rlm library has a BaseEnvironment
+from rlm.backends import BaseBackend # Assuming rlm library has a BaseBackend
 
-# Assuming rlm library is installed: pip install rlms
-# from rlm import RLM as RLM_Base
-# from rlm.logger import RLMLogger as RLM_Logger_Base
-# from rlm.environments import BaseEnvironment as RLM_BaseEnvironment
-# from rlm.completion import RLMCompletion as RLM_Completion_Result
-# from rlm.types import RLMStreamChunk as RLM_Stream_Chunk
-
-# Placeholder for RLM library imports for now,
-# as the actual rlm library classes might need specific import paths
-# We will use simple mock classes for initial structure, then replace
-# with actual RLM library imports upon installation and testing.
-
-class MockRLMCompletionResult:
-    def __init__(self, response: str, metadata: Optional[Dict] = None):
-        self.response = response
-        self.metadata = metadata if metadata is not None else {}
-
-class MockRLMLogger:
-    def __init__(self, log_dir: Optional[str] = None):
-        self.log_dir = log_dir
-        if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir)
-        self.trajectories = []
-
-    def log_trajectory(self, trajectory: Dict):
-        self.trajectories.append(trajectory)
-        if self.log_dir:
-            file_path = os.path.join(self.log_dir, f"rlm_log_{len(self.trajectories)}.jsonl")
-            with open(file_path, 'a') as f:
-                f.write(json.dumps(trajectory) + "\n")
-        # print(f"Logged trajectory chunk: {trajectory}") # For debugging
-
-class MockBaseEnvironment:
-    def execute_code(self, code: str, timeout: int = 60) -> Any:
-        raise NotImplementedError("Subclasses must implement execute_code")
-
-class LocalEnvironment(MockBaseEnvironment):
-    def execute_code(self, code: str, timeout: int = 60) -> Any:
-        # For a truly local environment, this would involve careful exec/eval
-        # For now, let's just simulate.
-        print(f"Executing code locally:\n{code}")
-        try:
-            # A very basic and UNSAFE simulation.
-            # In a real RLM, this is done with more safeguards.
-            # For this RLMClaw, we'll aim for a safer sandbox later.
-            _globals = {}
-            _locals = {}
-            exec(code, _globals, _locals)
-            return {"output": _locals.get('result', 'Execution successful (simulated).'), "error": None}
-        except Exception as e:
-            return {"output": None, "error": str(e)}
-
-class DockerEnvironment(MockBaseEnvironment):
-    def execute_code(self, code: str, timeout: int = 60) -> Any:
-        print(f"Simulating Docker execution for code:\n{code}")
-        return {"output": "Simulated Docker execution successful.", "error": None}
+# Set up logging for RLMClaw engine
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class RLMClawEngine:
-    """
-    Core RLMClaw inference engine, wrapping the RLM library for recursive task execution.
-    """
-    def __init__(
-        self,
-        backend: str = "openai",
-        backend_kwargs: Optional[Dict] = None,
-        environment: Union[str, Type[MockBaseEnvironment]] = "local",
-        logger: Optional[MockRLMLogger] = None,
-        verbose: bool = False,
-        max_recursive_calls: int = 5,
-        config: Optional[Dict] = None
-    ):
-        self.verbose = verbose
-        self.logger = logger if logger else MockRLMLogger()
-        self.max_recursive_calls = max_recursive_calls
-        self.config = config if config is not None else {}
+    def __init__(self, config: Dict[str, Any], workspace_path: str):
+        self.config = config
+        self.workspace_path = workspace_path
+        self.rlm_instance: Optional[RLM] = None
+        self.rlm_logger: Optional[RLMLogger] = None
+        self.environment: Optional[BaseEnvironment] = None
+        self.backend: Optional[BaseBackend] = None
 
-        # Initialize environment
-        self.environment_instance: MockBaseEnvironment
-        if isinstance(environment, str):
-            if environment == "local":
-                self.environment_instance = LocalEnvironment()
-            elif environment == "docker":
-                self.environment_instance = DockerEnvironment()
-            # Add other environments here (modal, prime, etc.)
-            else:
-                raise ValueError(f"Unknown environment type: {environment}")
-        elif inspect.isclass(environment) and issubclass(environment, MockBaseEnvironment):
-            self.environment_instance = environment()
+        self._load_config()
+        self._initialize_rlm()
+
+    def _load_config(self):
+        """Loads and validates configuration for RLM and its components."""
+        agent_config = self.config.get('agent', {})
+        self.model_name = agent_config.get('model', 'openai/gpt-4o')
+        self.temperature = agent_config.get('temperature', 0.7)
+        self.max_recursive_calls = agent_config.get('max_recursive_calls', 10)
+        self.environment_type = agent_config.get('environment', 'local')
+
+        self.providers_config = self.config.get('providers', {})
+        self.logging_config = self.config.get('logging', {})
+
+    def _get_environment_class(self, env_type: str) -> Type[BaseEnvironment]:
+        """Dynamically gets the environment class based on type string."""
+        # This will be replaced with actual dynamic loading from rlm/environments/
+        if env_type == 'local':
+            from rlm.environments.local import LocalREPL  # Assuming this exists
+            return LocalREPL
+        elif env_type == 'docker':
+            from rlm.environments.docker import DockerREPL # Assuming this exists
+            return DockerREPL
+        # Add more environment types as they are implemented
         else:
-            raise TypeError("Environment must be a string or a subclass of BaseEnvironment")
+            raise ValueError(f"Unsupported environment type: {env_type}")
 
-        # Mock RLM_Base for demonstration.
-        # In a real implementation, this would be the actual RLM from the library.
-        # This mock will allow us to simulate recursive calls.
-        class MockRLM:
-            def __init__(self_mock, backend, backend_kwargs, verbose, logger):
-                self_mock.backend = backend
-                self_mock.backend_kwargs = backend_kwargs
-                self_mock.verbose = verbose
-                self_mock.logger = logger
-                self_mock.environment = self.environment_instance # Pass the engine's environment
+    def _get_backend_class(self, model_name: str) -> Type[BaseBackend]:
+        """Dynamically gets the backend class based on model name prefix."""
+        # This will be replaced with actual dynamic loading from rlm/backends/ or similar
+        if model_name.startswith('openai'):
+            from rlm.backends.openai import OpenAIBackend # Assuming this exists
+            return OpenAIBackend
+        # Add more backend types as needed
+        else:
+            raise ValueError(f"Unsupported model backend for: {model_name}")
 
-            def completion(self_mock, prompt: str, **kwargs) -> MockRLMCompletionResult:
-                current_call_depth = kwargs.get('__call_depth', 0)
-                if self.verbose:
-                    print(f"[{'  '*current_call_depth}RLM Call Depth {current_call_depth}] Prompt: {prompt[:100]}...")
 
-                trajectory_entry = {
-                    "prompt": prompt,
-                    "call_depth": current_call_depth,
-                    "model": self_mock.backend_kwargs.get("model_name"),
-                    "response": None,
-                    "sub_calls": []
-                }
+    def _initialize_rlm(self):
+        """Initializes the RLM instance, logger, environment, and backend."""
+        logger.info(f"Initializing RLM with model: {self.model_name}, environment: {self.environment_type}")
 
-                # Simulate RLM's decision to make sub-calls or execute code
-                response_text = ""
-                if "execute code" in prompt.lower() and current_call_depth < self.max_recursive_calls:
-                    # Simulate code execution
-                    code_to_execute = self._extract_code_from_prompt(prompt)
-                    if code_to_execute:
-                        exec_result = self.environment_instance.execute_code(code_to_execute)
-                        if exec_result["error"]:
-                            response_text = f"Code execution failed: {exec_result['error']}"
-                        else:
-                            response_text = f"Code execution successful. Output: {exec_result['output']}"
-                        trajectory_entry["code_executed"] = code_to_execute
-                        trajectory_entry["execution_result"] = exec_result
+        # Initialize RLM Logger if configured
+        log_dir = self.logging_config.get('log_dir')
+        if log_dir:
+            full_log_dir = os.path.join(self.workspace_path, log_dir)
+            os.makedirs(full_log_dir, exist_ok=True)
+            self.rlm_logger = RLMLogger(log_dir=full_log_dir)
+            logger.info(f"RLM Logger initialized with log_dir: {full_log_dir}")
 
-                        # Simulate recursive call based on execution result
-                        if "Simulated Docker execution successful" in response_text:
-                            sub_prompt = f"Based on the Docker execution output, what's next? (Current depth: {current_call_depth})"
-                        else:
-                            sub_prompt = f"Code execution was {('successful' if not exec_result['error'] else 'unsuccessful')}. Analyze: {response_text}"
-                        
-                        sub_completion = self_mock.completion(sub_prompt, __call_depth=current_call_depth + 1)
-                        trajectory_entry["sub_calls"].append(sub_completion.metadata)
-                        response_text += f"\nRecursive analysis: {sub_completion.response}"
+        # Initialize Backend
+        backend_config = self.providers_config.get(self.model_name.split('/')[0], {}) # e.g., 'openai'
+        backend_cls = self._get_backend_class(self.model_name)
+        self.backend = backend_cls(model_name=self.model_name, **backend_config) # Pass full config to backend
 
-                    else:
-                        response_text = "I was asked to execute code but couldn't find any in the prompt."
-                elif "recursive call" in prompt.lower() and current_call_depth < self.max_recursive_calls:
-                    sub_prompt = f"This is a recursive call at depth {current_call_depth + 1}. What should I do next? (Max: {self.max_recursive_calls})"
-                    sub_completion = self_mock.completion(sub_prompt, __call_depth=current_call_depth + 1)
-                    trajectory_entry["sub_calls"].append(sub_completion.metadata)
-                    response_text = f"Performed recursive call. Result: {sub_completion.response}"
-                else:
-                    response_text = f"Completed task at depth {current_call_depth} with prompt: {prompt}"
+        # Initialize Environment
+        env_cls = self._get_environment_class(self.environment_type)
+        env_config = self.config.get('environments', {}).get(self.environment_type, {})
+        self.environment = env_cls(**env_config) # Pass environment specific config
 
-                trajectory_entry["response"] = response_text
-                self_mock.logger.log_trajectory(trajectory_entry)
-                return MockRLMCompletionResult(response_text, trajectory_entry)
+        # Initialize RLM
+        self.rlm_instance = RLM(
+            backend=self.backend, # Pass the initialized backend instance
+            environment=self.environment, # Pass the initialized environment instance
+            logger=self.rlm_logger,
+            max_recursion_depth=self.max_recursive_calls,
+            temperature=self.temperature,
+            verbose=True if self.logging_config.get('verbose_rlm', False) else False
+        )
+        logger.info("RLM instance initialized successfully.")
 
-        self.rlm_instance = MockRLM(backend, backend_kwargs, verbose, self.logger)
-
-    def _extract_code_from_prompt(self, prompt: str) -> Optional[str]:
-        # Simple extraction for demo purposes, looks for ```python ... ```
-        if "```python" in prompt and "```" in prompt:
-            start = prompt.find("```python") + len("```python")
-            end = prompt.find("```", start)
-            return prompt[start:end].strip()
-        return None
-
-    def completion(self, prompt: str) -> MockRLMCompletionResult:
+    def process_query(self, query: str, context: Optional[Dict[str, Any]] = None) -> str:
         """
-        Initiates an RLM-style completion for the given prompt.
+        Processes a user query using the RLM engine.
+        Args:
+            query: The user's input query.
+            context: Optional context to provide to the RLM.
+        Returns:
+            The RLM's response as a string.
         """
-        initial_trajectory = {
-            "prompt": prompt,
-            "call_depth": 0,
-            "model": self.rlm_instance.backend_kwargs.get("model_name"),
-            "response": None,
-            "sub_calls": []
-        }
-        
-        result = self.rlm_instance.completion(prompt, __call_depth=0)
-        
-        # After completion, the entire trajectory is in result.metadata
-        return result
+        if not self.rlm_instance:
+            raise RuntimeError("RLM instance not initialized.")
 
+        logger.info(f"Processing query: {query}")
+        try:
+            # The RLM completion call needs to properly handle context if it's passed.
+            # For simplicity, passing context directly. RLM's internal REPL is expected to use it.
+            response = self.rlm_instance.completion(
+                prompt=query,
+                context_variables=context # Assuming RLM can take context_variables
+            ).response
+            logger.info("Query processed successfully.")
+            return response
+        except Exception as e:
+            logger.error(f"Error processing RLM query: {e}", exc_info=True)
+            return f"An error occurred while processing your request: {e}"
+
+# Example Usage (for testing purposes)
 if __name__ == "__main__":
-    # Example Usage:
-    # This part demonstrates how the RLMClawEngine would be used.
-    # In the actual RLMClaw agent, this would be integrated into the main loop.
+    # Minimal dummy config for demonstration
+    dummy_config = {
+        "agent": {
+            "model": "openai/gpt-5-nano", # Placeholder for the RLM backend
+            "environment": "local",
+            "max_recursive_calls": 5,
+            "temperature": 0.5
+        },
+        "providers": {
+            "openai": {
+                "api_key": os.getenv("OPENAI_API_KEY", "dummy_openai_key")
+            }
+        },
+        "logging": {
+            "log_dir": "logs",
+            "verbose_rlm": True
+        }
+    }
+    dummy_workspace_path = os.getcwd() # Use current directory for example
 
-    print("--- RLMClaw Engine Demo ---")
+    try:
+        # Mock RLM components for local testing without full RLM library
+        # In a real scenario, these would come from `pip install rlms`
+        class MockBaseEnvironment:
+            def __init__(self, **kwargs): pass
+            def execute_code(self, code: str, timeout: int) -> str:
+                logger.info(f"Mock Env executing code: {code}")
+                if "error" in code: return "Mock execution error"
+                return f"Mock execution result for: {code}"
 
-    # Setup logger and engine
-    log_dir = "rlm_trajectories"
-    os.makedirs(log_dir, exist_ok=True)
-    my_logger = MockRLMLogger(log_dir=log_dir)
+        class LocalREPL(MockBaseEnvironment):
+            def __init__(self, **kwargs): super().__init__(**kwargs)
+        class DockerREPL(MockBaseEnvironment):
+            def __init__(self, **kwargs): super().__init__(**kwargs)
 
-    engine = RLMClawEngine(
-        backend="openai",
-        backend_kwargs={"model_name": "gpt-5-nano"},
-        environment="docker", # or "local" for simulated local execution
-        logger=my_logger,
-        verbose=True,
-        max_recursive_calls=3
-    )
+        class MockBaseBackend:
+            def __init__(self, model_name: str, **kwargs): self.model_name = model_name
+            def complete(self, prompt: str, **kwargs) -> Any:
+                logger.info(f"Mock Backend {self.model_name} completing prompt: {prompt}")
+                class MockCompletionResponse:
+                    def __init__(self, response_text): self.response = response_text
+                if "tool_call" in prompt:
+                    # Simulate a tool call by the RLM
+                    return MockCompletionResponse(f"tool_code_generated('{prompt.replace('tool_call(', '').replace(')', '')}')")
+                return MockCompletionResponse(f"Mock RLM response to: {prompt}")
 
-    # Test 1: Simple task
-    print("\n--- Test 1: Simple Task ---")
-    simple_prompt = "Summarize the key points about recursive language models."
-    result_simple = engine.completion(simple_prompt)
-    print(f"\nFinal Result (Simple): {result_simple.response}")
-    print(f"Trajectory saved to {log_dir}")
+        class OpenAIBackend(MockBaseBackend):
+            def __init__(self, model_name: str, **kwargs): super().__init__(model_name, **kwargs)
 
-    # Test 2: Task involving simulated code execution
-    print("\n--- Test 2: Simulated Code Execution Task ---")
-    code_prompt = """
-    I need you to execute code to calculate the sum of 5 and 3.
-    ```python
-    result = 5 + 3
-    ```
-    After execution, based on the output, tell me what you would do next.
-    """
-    result_code = engine.completion(code_prompt)
-    print(f"\nFinal Result (Code): {result_code.response}")
-    print(f"Trajectory saved to {log_dir}")
+        class MockRLMLogger:
+            def __init__(self, log_dir): self.log_dir = log_dir
+            def log_completion(self, *args, **kwargs): logger.info(f"Mock RLM logging to {self.log_dir}")
 
-    # Test 3: Task involving multiple recursive calls
-    print("\n--- Test 3: Multiple Recursive Calls ---")
-    recursive_prompt = "Start a recursive call to deeply analyze the concept of AI autonomy."
-    result_recursive = engine.completion(recursive_prompt)
-    print(f"\nFinal Result (Recursive): {result_recursive.response}")
-    print(f"Trajectory saved to {log_dir}")
+        class MockRLM:
+            def __init__(self, backend, environment, logger, max_recursion_depth, temperature, verbose):
+                self.backend = backend
+                self.environment = environment
+                self.logger = logger
+                self.max_recursion_depth = max_recursion_depth
+                self.temperature = temperature
+                self.verbose = verbose
+                self.current_recursion_depth = 0
 
-    print("\n--- All demos completed ---")
-    print(f"You can inspect the generated JSONL files in the '{log_dir}' directory.")
+            def completion(self, prompt: str, context_variables: Optional[Dict[str, Any]] = None) -> Any:
+                self.current_recursion_depth += 1
+                if self.current_recursion_depth > self.max_recursion_depth:
+                    raise RecursionError("Max recursion depth exceeded in Mock RLM.")
+
+                logger.info(f"Mock RLM: Current depth {self.current_recursion_depth}, prompt: {prompt}")
+                if self.logger:
+                    self.logger.log_completion(prompt=prompt, context=context_variables)
+
+                # Simulate RLM's internal logic: decompose, call tool, make sub-call
+                if "decompose" in prompt:
+                    sub_task = prompt.replace("decompose ", "")
+                    # Simulate calling a tool from the environment
+                    tool_result = self.environment.execute_code(f"run_tool('{sub_task}')", 30)
+                    # Simulate an RLM sub-call
+                    sub_response = self.completion(f"continue_with_result {tool_result}", context_variables)
+                    return self.backend.complete(f"Final response for '{prompt}' based on '{sub_response}'")
+                elif "continue_with_result" in prompt:
+                    return self.backend.complete(f"Processed result: {prompt}")
+                else:
+                    return self.backend.complete(prompt)
+
+        # Monkey patch RLM library imports for mock objects
+        import sys
+        sys.modules['rlm.environments.local'] = sys.modules[__name__]
+        sys.modules['rlm.environments.docker'] = sys.modules[__name__]
+        sys.modules['rlm.backends.openai'] = sys.modules[__name__]
+        sys.modules['rlm'] = sys.modules[__name__] # Mock RLM class itself
+        sys.modules['rlm.RLMLogger'] = sys.modules[__name__] # Mock RLM logger
+
+        # Re-import for the RLMClawEngine to pick up mocks
+        global RLM, RLMLogger, BaseEnvironment, BaseBackend
+        RLM = MockRLM
+        RLMLogger = MockRLMLogger
+        BaseEnvironment = MockBaseEnvironment
+        BaseBackend = MockBaseBackend
+
+        engine = RLMClawEngine(dummy_config, dummy_workspace_path)
+        response = engine.process_query("decompose the task of writing a short story")
+        print(f"\nRLMClaw Response: {response}")
+
+        response_error = engine.process_query("decompose and cause an error")
+        print(f"\nRLMClaw Response (with simulated error): {response_error}")
+
+    except Exception as e:
+        print(f"Failed to run RLMClawEngine example: {e}")
+        print("Please ensure you have the 'rlms' library installed (`pip install rlms`) and necessary backend/environment dependencies.")
